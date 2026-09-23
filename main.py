@@ -83,23 +83,6 @@ def get_tables():
     }
 
 
-# def get_all_from_table(table_name: str):
-
-#     query = text(
-#         f"""
-#         SELECT *
-#         FROM "{table_name}";
-#         """
-#     )
-
-#     with engine.connect() as connection:
-#         result = connection.execute(query)
-
-#         rows = result.mappings().all()
-
-#     return rows
-
-
 def get_all_from_table(table_name: str):
 
     query = text(
@@ -112,14 +95,10 @@ def get_all_from_table(table_name: str):
     with engine.connect() as connection:
         result = connection.execute(query)
 
-        rows = [dict(row) for row in result.mappings().all()]
-
-    # Modification temporaire pour tester le déploiement Railway
-    if table_name == "Groups":
-        for row in rows:
-            row["name"] = "mocked_name"
+        rows = result.mappings().all()
 
     return rows
+
 
 
 def _get_user_id_from_token(
@@ -205,6 +184,34 @@ def login(body: dict):
     return {'token': token, 'pseudo': result.get('pseudo'), 'id': result.get('id')}
 
 
+# @app.get('/my_groups')
+# def my_groups(user_id: int = Depends(_get_user_id_from_token)):
+#     logger.info(f'[my_groups] requested for user_id={user_id}')
+
+#     query_groups = text('''
+#         SELECT g.*
+#         FROM "Groups" g
+#         JOIN "Members" m ON g.id = m."group"
+#         WHERE m."user" = :uid
+#         ORDER BY g.id
+#     ''')
+
+#     query_members = text('''
+#         SELECT * FROM "Members" WHERE "user" = :uid ORDER BY id
+#     ''')
+
+#     with engine.connect() as connection:
+#         res_g = connection.execute(query_groups, {'uid': user_id})
+#         groups = res_g.mappings().all()
+
+#         res_m = connection.execute(query_members, {'uid': user_id})
+#         members = res_m.mappings().all()
+
+#     logger.info(f'[my_groups] found groups_count={len(groups)} members_count={len(members)}')
+
+#     return {'groups': groups, 'members': members}
+
+
 @app.get('/my_groups')
 def my_groups(user_id: int = Depends(_get_user_id_from_token)):
     logger.info(f'[my_groups] requested for user_id={user_id}')
@@ -223,14 +230,25 @@ def my_groups(user_id: int = Depends(_get_user_id_from_token)):
 
     with engine.connect() as connection:
         res_g = connection.execute(query_groups, {'uid': user_id})
-        groups = res_g.mappings().all()
+        groups = [dict(row) for row in res_g.mappings().all()]
 
         res_m = connection.execute(query_members, {'uid': user_id})
         members = res_m.mappings().all()
 
-    logger.info(f'[my_groups] found groups_count={len(groups)} members_count={len(members)}')
+    # TEST RAILWAY : modifier temporairement le nom des groupes
+    for group in groups:
+        group['name'] = 'caca'
 
-    return {'groups': groups, 'members': members}
+    logger.info(
+        f'[my_groups] found groups_count={len(groups)} '
+        f'members_count={len(members)}'
+    )
+
+    return {
+        'groups': groups,
+        'members': members
+    }
+
 
 
 @app.get("/groups")
