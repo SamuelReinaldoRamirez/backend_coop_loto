@@ -83,6 +83,23 @@ def get_tables():
     }
 
 
+# def get_all_from_table(table_name: str):
+
+#     query = text(
+#         f"""
+#         SELECT *
+#         FROM "{table_name}";
+#         """
+#     )
+
+#     with engine.connect() as connection:
+#         result = connection.execute(query)
+
+#         rows = result.mappings().all()
+
+#     return rows
+
+
 def get_all_from_table(table_name: str):
 
     query = text(
@@ -95,7 +112,12 @@ def get_all_from_table(table_name: str):
     with engine.connect() as connection:
         result = connection.execute(query)
 
-        rows = result.mappings().all()
+        rows = [dict(row) for row in result.mappings().all()]
+
+    # Modification temporaire pour tester le déploiement Railway
+    if table_name == "Groups":
+        for row in rows:
+            row["name"] = "mocked_name"
 
     return rows
 
