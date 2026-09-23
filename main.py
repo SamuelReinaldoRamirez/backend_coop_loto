@@ -184,34 +184,6 @@ def login(body: dict):
     return {'token': token, 'pseudo': result.get('pseudo'), 'id': result.get('id')}
 
 
-# @app.get('/my_groups')
-# def my_groups(user_id: int = Depends(_get_user_id_from_token)):
-#     logger.info(f'[my_groups] requested for user_id={user_id}')
-
-#     query_groups = text('''
-#         SELECT g.*
-#         FROM "Groups" g
-#         JOIN "Members" m ON g.id = m."group"
-#         WHERE m."user" = :uid
-#         ORDER BY g.id
-#     ''')
-
-#     query_members = text('''
-#         SELECT * FROM "Members" WHERE "user" = :uid ORDER BY id
-#     ''')
-
-#     with engine.connect() as connection:
-#         res_g = connection.execute(query_groups, {'uid': user_id})
-#         groups = res_g.mappings().all()
-
-#         res_m = connection.execute(query_members, {'uid': user_id})
-#         members = res_m.mappings().all()
-
-#     logger.info(f'[my_groups] found groups_count={len(groups)} members_count={len(members)}')
-
-#     return {'groups': groups, 'members': members}
-
-
 @app.get('/my_groups')
 def my_groups(user_id: int = Depends(_get_user_id_from_token)):
     logger.info(f'[my_groups] requested for user_id={user_id}')
@@ -230,25 +202,14 @@ def my_groups(user_id: int = Depends(_get_user_id_from_token)):
 
     with engine.connect() as connection:
         res_g = connection.execute(query_groups, {'uid': user_id})
-        groups = [dict(row) for row in res_g.mappings().all()]
+        groups = res_g.mappings().all()
 
         res_m = connection.execute(query_members, {'uid': user_id})
         members = res_m.mappings().all()
 
-    # TEST RAILWAY : modifier temporairement le nom des groupes
-    for group in groups:
-        group['name'] = 'caca'
+    logger.info(f'[my_groups] found groups_count={len(groups)} members_count={len(members)}')
 
-    logger.info(
-        f'[my_groups] found groups_count={len(groups)} '
-        f'members_count={len(members)}'
-    )
-
-    return {
-        'groups': groups,
-        'members': members
-    }
-
+    return {'groups': groups, 'members': members}
 
 
 @app.get("/groups")
