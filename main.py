@@ -465,6 +465,7 @@ def get_euromillions_draws():
         ],
     }
 
+
 @app.get("/euromillions/stats/current")
 def get_current_euromillions_stats():
 
@@ -478,11 +479,17 @@ def get_current_euromillions_stats():
             n5
         FROM "Draws"
         ORDER BY draw_date DESC
-        LIMIT 30
     """)
 
     with engine.connect() as conn:
-        draws = conn.execute(query).mappings().all()
+        all_draws = conn.execute(query).mappings().all()
+
+    # ====================================================
+    # HOT / COLD
+    # Uniquement sur les 30 derniers tirages
+    # ====================================================
+
+    draws = all_draws[:30]
 
     counts = {
         number: 0
@@ -518,35 +525,54 @@ def get_current_euromillions_stats():
         )
     )[:10]
 
-    last_seen = {
+    # ====================================================
+    # RETARD
+    #
+    # Sur TOUS les tirages disponibles.
+    #
+    # all_draws est du plus récent au plus ancien.
+    #
+    # Si le numéro est dans all_draws[0] :
+    #     retard = 0
+    #
+    # Si le numéro est dans all_draws[1] :
+    #     retard = 1
+    #
+    # etc.
+    # ====================================================
+
+    overdue_counts = {
         number: None
         for number in range(1, 51)
     }
 
-    for draw in draws:
+    for number in range(1, 51):
 
-        for column in (
-            "n1",
-            "n2",
-            "n3",
-            "n4",
-            "n5",
-        ):
-            number = draw[column]
+        for index, draw in enumerate(all_draws):
 
-            if number is None:
-                continue
+            numbers = (
+                draw["n1"],
+                draw["n2"],
+                draw["n3"],
+                draw["n4"],
+                draw["n5"],
+            )
 
-            if last_seen[number] is None:
-                last_seen[number] = draw["draw_date"]
+            if number in numbers:
+                overdue_counts[number] = index
+                break
 
+    # Les numéros jamais sortis sont placés après
+    # ceux qui ont un retard calculable.
+    #
+    # Parmi les numéros sortis, les plus gros retards
+    # viennent en premier.
     overdue = sorted(
-        last_seen.items(),
+        overdue_counts.items(),
         key=lambda item: (
-            item[1] is not None,
-            item[1]
-            if item[1] is not None
-            else date.min,
+            item[1] is None,
+            -(item[1] if item[1] is not None else 0),
+            item[0],
         )
     )[:10]
 
@@ -558,6 +584,7 @@ def get_current_euromillions_stats():
             }
             for number, count in hot
         ],
+
         "cold": [
             {
                 "number": number,
@@ -565,18 +592,157 @@ def get_current_euromillions_stats():
             }
             for number, count in cold
         ],
+
         "overdue": [
             {
                 "number": number,
-                "last_seen": (
-                    last_seen_date.isoformat()
-                    if last_seen_date is not None
-                    else None
+                "count": (
+                    count
+                    if count is not None
+                    else len(all_draws)
                 ),
             }
-            for number, last_seen_date in overdue
+            for number, count in overdue
         ],
     }
+
+
+# @app.get("/euromillions/stats/current")
+# def get_current_euromillions_stats():
+
+#     query = text("""
+#         SELECT
+#             draw_date,
+#             n1,
+#             n2,
+#             n3,
+#             n4,
+#             n5
+#         FROM "Draws"
+#         ORDER BY draw_date DESC
+#         LIMIT 30
+#     """)
+
+#     with engine.connect() as conn:
+#         draws = conn.execute(query).mappings().all()
+
+#     counts = {
+#         number: 0
+#         for number in range(1, 51)
+#     }
+
+#     for draw in draws:
+#         for column in (
+#             "n1",
+#             "n2",
+#             "n3",
+#             "n4",
+#             "n5",
+#         ):
+#             number = draw[column]
+
+#             if number is not None:
+#                 counts[number] += 1
+
+#     hot = sorted(
+#         counts.items(),
+#         key=lambda item: (
+#             -item[1],
+#             item[0],
+#         )
+#     )[:10]
+
+#     cold = sorted(
+#         counts.items(),
+#         key=lambda item: (
+#             item[1],
+#             item[0],
+#         )
+#     )[:10]
+
+#     # Nombre de tirages depuis la dernière apparition
+#     overdue_counts = {}
+
+#     for number in range(1, 51):
+
+#         delay = len(draws)
+
+#         # draws est du plus récent au plus ancien
+#         for i, draw in enumerate(draws):
+
+#             if number in (
+#                 draw["n1"],
+#                 draw["n2"],
+#                 draw["n3"],
+#                 draw["n4"],
+#                 draw["n5"],
+#             ):
+#                 delay = i
+#                 break
+
+#         overdue_counts[number] = delay
+
+#     overdue = sorted(
+#         overdue_counts.items(),
+#         key=lambda item: (-item[1], item[0])
+#     )[:10]
+
+#     # last_seen = {
+#     #     number: None
+#     #     for number in range(1, 51)
+#     # }
+
+#     # for draw in draws:
+
+#     #     for column in (
+#     #         "n1",
+#     #         "n2",
+#     #         "n3",
+#     #         "n4",
+#     #         "n5",
+#     #     ):
+#     #         number = draw[column]
+
+#     #         if number is None:
+#     #             continue
+
+#     #         if last_seen[number] is None:
+#     #             last_seen[number] = draw["draw_date"]
+
+#     # overdue = sorted(
+#     #     last_seen.items(),
+#     #     key=lambda item: (
+#     #         item[1] is not None,
+#     #         item[1]
+#     #         if item[1] is not None
+#     #         else date.min,
+#     #     )
+#     # )[:10]
+
+#     return {
+#         "hot": [
+#             {
+#                 "number": number,
+#                 "count": count,
+#             }
+#             for number, count in hot
+#         ],
+#         "cold": [
+#             {
+#                 "number": number,
+#                 "count": count,
+#             }
+#             for number, count in cold
+#         ],
+#         "overdue": [
+#             {
+#                 "number": number,
+#                 "count": count,
+#             }
+#             for number, count in overdue
+#         ],
+#     }
+
 
 @app.get("/euromillions/stats")
 def get_euromillions_stats():
@@ -603,14 +769,15 @@ def get_euromillions_stats():
 
         draw_id = draw["id"]
 
-        # Les 30 tirages précédents
-        previous_draws = draws[
-            max(0, index - 30):index
-        ]
-
         # ====================================================
         # HOT / COLD
         # ====================================================
+        # Pour Hot / Cold, on regarde uniquement les
+        # 30 tirages précédant le tirage actuel.
+
+        previous_draws = draws[
+            max(0, index - 30):index
+        ]
 
         counts = {
             number: 0
@@ -648,49 +815,55 @@ def get_euromillions_stats():
         )[:10]
 
         # ====================================================
-        # OVERDUE
+        # RETARD
         # ====================================================
+        # Pour le retard, on regarde TOUT l'historique
+        # précédent, sans limite de 30 tirages.
+        #
+        # Exemple :
+        #
+        # - numéro sorti au tirage précédent -> retard = 0
+        # - numéro sorti il y a 1 tirage      -> retard = 1
+        # - numéro sorti il y a 2 tirages     -> retard = 2
+        #
+        # Le tirage actuel n'est évidemment pas pris en compte.
 
-        # On part du principe qu'un numéro jamais sorti
-        # avant ce tirage est plus "en retard" que tous
-        # les numéros déjà sortis.
-        last_seen = {
-            number: None
-            for number in range(1, 51)
-        }
+        all_previous_draws = draws[:index]
 
-        # previous_draws est du plus ancien au plus récent.
-        # On parcourt donc en sens inverse pour trouver
-        # la dernière apparition de chaque numéro.
-        for previous_draw in reversed(previous_draws):
+        overdue_counts = {}
 
-            for column in (
-                "n1",
-                "n2",
-                "n3",
-                "n4",
-                "n5",
+        for number in range(1, 51):
+
+            # Par défaut, si le numéro n'est jamais apparu
+            # avant ce tirage, on lui attribue un retard
+            # correspondant à tout l'historique précédent.
+            delay = len(all_previous_draws)
+
+            # On parcourt les tirages précédents du plus récent
+            # au plus ancien.
+            for i, previous_draw in enumerate(
+                reversed(all_previous_draws)
             ):
-                number = previous_draw[column]
 
-                if number is None:
-                    continue
+                if number in (
+                    previous_draw["n1"],
+                    previous_draw["n2"],
+                    previous_draw["n3"],
+                    previous_draw["n4"],
+                    previous_draw["n5"],
+                ):
+                    delay = i
+                    break
 
-                if last_seen[number] is None:
-                    last_seen[number] = (
-                        previous_draw["draw_date"]
-                    )
+            overdue_counts[number] = delay
 
+        # Les plus gros retards en premier.
+        # En cas d'égalité, le plus petit numéro en premier.
         overdue = sorted(
-            last_seen.items(),
+            overdue_counts.items(),
             key=lambda item: (
-                # Les numéros jamais sortis passent en premier
-                item[1] is not None,
-
-                # Puis les dates les plus anciennes
-                item[1]
-                if item[1] is not None
-                else draw["draw_date"],
+                -item[1],
+                item[0],
             )
         )[:10]
 
@@ -718,17 +891,148 @@ def get_euromillions_stats():
             "overdue": [
                 {
                     "number": number,
-                    "last_seen": (
-                        last_seen_date.isoformat()
-                        if last_seen_date is not None
-                        else None
-                    ),
+                    "count": count,
                 }
-                for number, last_seen_date in overdue
+                for number, count in overdue
             ],
         }
 
     return results
+
+    
+# @app.get("/euromillions/stats")
+# def get_euromillions_stats():
+
+#     query = text("""
+#         SELECT
+#             id,
+#             draw_date,
+#             n1,
+#             n2,
+#             n3,
+#             n4,
+#             n5
+#         FROM "Draws"
+#         ORDER BY draw_date ASC
+#     """)
+
+#     with engine.connect() as conn:
+#         draws = conn.execute(query).mappings().all()
+
+#     results = {}
+
+#     for index, draw in enumerate(draws):
+
+#         draw_id = draw["id"]
+
+#         # Les 30 tirages précédents
+#         previous_draws = draws[
+#             max(0, index - 30):index
+#         ]
+
+#         # ====================================================
+#         # HOT / COLD
+#         # ====================================================
+
+#         counts = {
+#             number: 0
+#             for number in range(1, 51)
+#         }
+
+#         for previous_draw in previous_draws:
+
+#             for column in (
+#                 "n1",
+#                 "n2",
+#                 "n3",
+#                 "n4",
+#                 "n5",
+#             ):
+#                 number = previous_draw[column]
+
+#                 if number is not None:
+#                     counts[number] += 1
+
+#         hot = sorted(
+#             counts.items(),
+#             key=lambda item: (
+#                 -item[1],
+#                 item[0],
+#             )
+#         )[:10]
+
+#         cold = sorted(
+#             counts.items(),
+#             key=lambda item: (
+#                 item[1],
+#                 item[0],
+#             )
+#         )[:10]
+
+#         # ====================================================
+#         # OVERDUE
+#         # ====================================================
+
+#         # On part du principe qu'un numéro jamais sorti
+#         # avant ce tirage est plus "en retard" que tous
+#         # les numéros déjà sortis.
+#         overdue_counts = {}
+
+#         for number in range(1, 51):
+
+#             delay = len(previous_draws)
+
+#             # on part du plus récent
+#             for i, previous_draw in enumerate(reversed(previous_draws)):
+
+#                 if number in (
+#                     previous_draw["n1"],
+#                     previous_draw["n2"],
+#                     previous_draw["n3"],
+#                     previous_draw["n4"],
+#                     previous_draw["n5"],
+#                 ):
+#                     delay = i
+#                     break
+
+#             overdue_counts[number] = delay
+
+#         overdue = sorted(
+#             overdue_counts.items(),
+#             key=lambda item: (-item[1], item[0])
+#         )[:10]
+
+#         # ====================================================
+#         # RESULTAT
+#         # ====================================================
+
+#         results[draw_id] = {
+#             "hot": [
+#                 {
+#                     "number": number,
+#                     "count": count,
+#                 }
+#                 for number, count in hot
+#             ],
+
+#             "cold": [
+#                 {
+#                     "number": number,
+#                     "count": count,
+#                 }
+#                 for number, count in cold
+#             ],
+
+#             "overdue": [
+#                 {
+#                     "number": number,
+#                     "count": count,
+#                 }
+#                 for number, count in overdue
+#             ],
+#         }
+
+#     return results
 
 @app.post("/euromillions/collect")
 async def collect_euromillions():
