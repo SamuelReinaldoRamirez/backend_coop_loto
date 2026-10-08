@@ -142,8 +142,13 @@ def _get_user_id_from_token(
 
 @app.get("/me")
 def me(user_id: int = Depends(_get_user_id_from_token)):
+    # query = text("""
+    #     SELECT id, pseudo
+    #     FROM "Users"
+    #     WHERE id = :id
+    # """)
     query = text("""
-        SELECT id, pseudo
+        SELECT id, pseudo, credits
         FROM "Users"
         WHERE id = :id
     """)
@@ -238,6 +243,7 @@ def get_group_members(
             m.id AS member_id,
             m."group" AS group_id,
             m."user" AS user_id,
+            m.total_spent AS total_spent,
             u.pseudo
         FROM "Members" m
         JOIN "Users" u
