@@ -24,6 +24,11 @@ class CollectPeriodRequest(BaseModel):
     start_date: date
     end_date: date
 
+class CreateGroupGridRequest(BaseModel):
+    numbers: list[int]
+    stars: list[int]
+    draw_date: date
+
 # Configure logging BEFORE creating logger
 logging.basicConfig(
     level=logging.DEBUG,
@@ -277,6 +282,195 @@ def get_group_members(
     }
 
 
+@app.post("/groups/{group_id}/grids")
+def create_group_grid(
+    group_id: int,
+    body: CreateGroupGridRequest,
+    user_id: int = Depends(_get_user_id_from_token),
+):
+    # --------------------------------------------------------
+    # 1. Vérification des numéros et étoiles
+    # --------------------------------------------------------
+
+    if len(body.numbers) != 5:
+        raise HTTPException(
+            status_code=400,
+            detail="Une grille doit contenir exactement 5 numéros.",
+        )
+
+    if len(set(body.numbers)) != 5:
+        raise HTTPException(
+            status_code=400,
+            detail="Les 5 numéros doivent être distincts.",
+        )
+
+    if any(number < 1 or number > 50 for number in body.numbers):
+        raise HTTPException(
+            status_code=400,
+            detail="Les numéros doivent être compris entre 1 et 50.",
+        )
+
+    if len(body.stars) != 2:
+        raise HTTPException(
+            status_code=400,
+            detail="Une grille doit contenir exactement 2 étoiles.",
+        )
+
+    if len(set(body.stars)) != 2:
+        raise HTTPException(
+            status_code=400,
+            detail="Les 2 étoiles doivent être distinctes.",
+        )
+
+    if any(star < 1 or star > 12 for star in body.stars):
+        raise HTTPException(
+            status_code=400,
+            detail="Les étoiles doivent être comprises entre 1 et 12.",
+        )
+
+    numbers = sorted(body.numbers)
+    stars = sorted(body.stars)
+
+    # --------------------------------------------------------
+    # 2. Vérification de l'appartenance au groupe
+    # --------------------------------------------------------
+
+    membership_query = text("""
+        SELECT 1
+        FROM "Members"
+        WHERE "group" = :group_id
+          AND "user" = :user_id
+        LIMIT 1
+    """)
+
+    with engine.connect() as conn:
+        membership = conn.execute(
+            membership_query,
+            {
+                "group_id": group_id,
+                "user_id": user_id,
+            },
+        ).first()
+
+    if membership is None:
+        raise HTTPException(
+            status_code=403,
+            detail="Vous n'êtes pas membre de ce groupe.",
+        )
+
+    # --------------------------------------------------------
+    # 3. Insertion dans public."Group_grids"
+    # --------------------------------------------------------
+
+    insert_query = text("""
+        INSERT INTO public."Group_grids" (
+            author,
+            n1, n2, n3, n4, n5,
+            e1, e2,
+            draw_date,
+            status,
+            "group"
+        )
+        VALUES (
+            :author,
+            :n1, :n2, :n3, :n4, :n5,
+            :e1, :e2,
+            :draw_date,
+            :status,
+            :group_id
+        )
+        RETURNING
+            id,
+            created_at,
+            author,
+            n1, n2, n3, n4, n5,
+            e1, e2,
+            draw_date,
+            status,
+            "group" AS group_id
+    """)
+
+    try:
+        with engine.begin() as conn:
+            grid = conn.execute(
+                insert_query,
+                {
+                    "author": user_id,
+                    "n1": numbers[0],
+                    "n2": numbers[1],
+                    "n3": numbers[2],
+                    "n4": numbers[3],
+                    "n5": numbers[4],
+                    "e1": stars[0],
+                    "e2": stars[1],
+                    "draw_date": body.draw_date,
+                    "status": "suggérée",
+                    "group_id": group_id,
+                },
+            ).mappings().one()
+
+        return {
+            "success": True,
+            "message": "Grille ajoutée au groupe.",
+            "grid": dict(grid),
+        }
+
+    except Exception:
+        logger.exception(
+            "[create_group_grid] Erreur pendant l'insertion"
+        )
+        raise HTTPException(
+            status_code=500,
+            detail="Impossible d'enregistrer la grille.",
+        )
+
+
+
+@app.get("/groups/{group_id}/grids")
+def get_group_grids(
+    group_id: int,
+    user_id: int = Depends(_get_user_id_from_token),
+):
+    query = text("""
+        SELECT
+            gg.id,
+            gg.created_at,
+            gg.author,
+            u.pseudo AS author_pseudo,
+            gg.n1, gg.n2, gg.n3, gg.n4, gg.n5,
+            gg.e1, gg.e2,
+            gg.draw_date,
+            COALESCE(gg.status, 'suggérée') AS status,
+            gg."group" AS group_id
+        FROM public."Group_grids" gg
+        JOIN "Users" u
+            ON u.id = gg.author
+        WHERE gg."group" = :group_id
+          AND EXISTS (
+              SELECT 1
+              FROM "Members" m
+              WHERE m."group" = :group_id
+                AND m."user" = :user_id
+          )
+        ORDER BY
+            gg.draw_date DESC NULLS LAST,
+            gg.created_at DESC
+    """)
+
+    with engine.connect() as conn:
+        grids = conn.execute(
+            query,
+            {
+                "group_id": group_id,
+                "user_id": user_id,
+            },
+        ).mappings().all()
+
+    return {
+        "group_id": group_id,
+        "grids": [dict(grid) for grid in grids],
+    }
+    
 @app.get("/split_rules")
 def get_split_rules():
 
