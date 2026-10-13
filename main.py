@@ -21,6 +21,7 @@ from services.euromillions_scraper import (
     scrape_euromillions_period,
 )
 
+
 def _get_next_draw_date(now: Optional[datetime] = None) -> date:
     paris_tz = ZoneInfo("Europe/Paris")
 
@@ -35,25 +36,31 @@ def _get_next_draw_date(now: Optional[datetime] = None) -> date:
     minutes = current.hour * 60 + current.minute
     cutoff = 20 * 60
 
-    # Mardi avant 20 h : tirage du mardi.
-    if weekday == 1 and minutes < cutoff:
-        return current.date()
-
-    # Vendredi avant 20 h : tirage du vendredi.
-    if weekday == 4 and minutes < cutoff:
-        return current.date()
-
-    # Mardi à partir de 20 h : prochain tirage vendredi.
+    # Mardi : mardi avant 20 h, sinon vendredi.
     if weekday == 1:
+        if minutes < cutoff:
+            return current.date()
         return (current + timedelta(days=3)).date()
 
-    # Vendredi à partir de 20 h : prochain tirage mardi.
+    # Vendredi : vendredi avant 20 h, sinon mardi suivant.
     if weekday == 4:
+        if minutes < cutoff:
+            return current.date()
         return (current + timedelta(days=4)).date()
 
-    # Autres jours : prochain mardi.
+    # Lundi : mardi dans 1 jour.
+    if weekday == 0:
+        return (current + timedelta(days=1)).date()
+
+    # Mercredi ou jeudi : vendredi.
+    if weekday in (2, 3):
+        days_until_friday = 4 - weekday
+        return (current + timedelta(days=days_until_friday)).date()
+
+    # Samedi ou dimanche : mardi suivant.
     days_until_tuesday = (1 - weekday + 7) % 7
     return (current + timedelta(days=days_until_tuesday)).date()
+
 
 class CollectPeriodRequest(BaseModel):
     start_date: date
