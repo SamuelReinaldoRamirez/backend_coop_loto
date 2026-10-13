@@ -13,12 +13,47 @@ import asyncio
 
 from datetime import date
 from pydantic import BaseModel
+from zoneinfo import ZoneInfo
 
 
 from services.euromillions_scraper import (
     scrape_latest_euromillions_draw,
     scrape_euromillions_period,
 )
+
+def _get_next_draw_date(now: Optional[datetime] = None) -> date:
+    paris_tz = ZoneInfo("Europe/Paris")
+
+    current = now or datetime.now(paris_tz)
+
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=paris_tz)
+    else:
+        current = current.astimezone(paris_tz)
+
+    weekday = current.weekday()
+    minutes = current.hour * 60 + current.minute
+    cutoff = 20 * 60
+
+    # Mardi avant 20 h : tirage du mardi.
+    if weekday == 1 and minutes < cutoff:
+        return current.date()
+
+    # Vendredi avant 20 h : tirage du vendredi.
+    if weekday == 4 and minutes < cutoff:
+        return current.date()
+
+    # Mardi à partir de 20 h : prochain tirage vendredi.
+    if weekday == 1:
+        return (current + timedelta(days=3)).date()
+
+    # Vendredi à partir de 20 h : prochain tirage mardi.
+    if weekday == 4:
+        return (current + timedelta(days=4)).date()
+
+    # Autres jours : prochain mardi.
+    days_until_tuesday = (1 - weekday + 7) % 7
+    return (current + timedelta(days=days_until_tuesday)).date()
 
 class CollectPeriodRequest(BaseModel):
     start_date: date
@@ -468,6 +503,56 @@ def get_group_grids(
 
     return {
         "group_id": group_id,
+        "grids": [dict(grid) for grid in grids],
+    }
+
+
+@app.get("/groups/{group_id}/grids/next-draw")
+def get_group_grids_next_draw(
+    group_id: int,
+    user_id: int = Depends(_get_user_id_from_token),
+):
+    draw_date = _get_next_draw_date()
+
+    query = text("""
+        SELECT
+            gg.id,
+            gg.created_at,
+            gg.author,
+            u.pseudo AS author_pseudo,
+            gg.n1, gg.n2, gg.n3, gg.n4, gg.n5,
+            gg.e1, gg.e2,
+            gg.draw_date,
+            COALESCE(gg.status, 'suggérée') AS status,
+            gg."group" AS group_id
+        FROM public."Group_grids" gg
+        JOIN public."Users" u
+            ON u.id = gg.author
+        WHERE gg."group" = :group_id
+          AND gg.draw_date = :draw_date
+          AND EXISTS (
+              SELECT 1
+              FROM public."Members" m
+              WHERE m."group" = :group_id
+                AND m."user" = :user_id
+          )
+        ORDER BY
+            gg.created_at DESC
+    """)
+
+    with engine.connect() as conn:
+        grids = conn.execute(
+            query,
+            {
+                "group_id": group_id,
+                "user_id": user_id,
+                "draw_date": draw_date,
+            },
+        ).mappings().all()
+
+    return {
+        "group_id": group_id,
+        "draw_date": draw_date.isoformat(),
         "grids": [dict(grid) for grid in grids],
     }
     
