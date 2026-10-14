@@ -237,44 +237,360 @@ def login(body: dict):
     return {'token': token, 'pseudo': result.get('pseudo'), 'id': result.get('id')}
 
 
-@app.get('/my_groups')
-def my_groups(user_id: int = Depends(_get_user_id_from_token)):
-    logger.info(f'[my_groups] requested for user_id={user_id}')
+# @app.get('/my_groups')
+# def my_groups(user_id: int = Depends(_get_user_id_from_token)):
+#     logger.info(f'[my_groups] requested for user_id={user_id}')
 
-    query_groups = text('''
+#     query_groups = text('''
+#         SELECT g.*
+#         FROM "Groups" g
+#         JOIN "Members" m ON g.id = m."group"
+#         WHERE m."user" = :uid
+#         ORDER BY g.id
+#     ''')
+
+#     query_members = text('''
+#         SELECT * FROM "Members" WHERE "user" = :uid ORDER BY id
+#     ''')
+
+#     with engine.connect() as connection:
+#         res_g = connection.execute(query_groups, {'uid': user_id})
+#         groups = res_g.mappings().all()
+
+#         res_m = connection.execute(query_members, {'uid': user_id})
+#         members = res_m.mappings().all()
+
+#     logger.info(f'[my_groups] found groups_count={len(groups)} members_count={len(members)}')
+
+#     return {'groups': groups, 'members': members}
+
+@app.get("/my_groups")
+def my_groups(
+    user_id: int = Depends(_get_user_id_from_token),
+):
+    logger.info(
+        f"[my_groups] requested for user_id={user_id}"
+    )
+
+    query_groups = text("""
         SELECT g.*
         FROM "Groups" g
-        JOIN "Members" m ON g.id = m."group"
+        JOIN "Members" m
+          ON g.id = m."group"
         WHERE m."user" = :uid
+          AND m.request_status = 'accepted'
         ORDER BY g.id
-    ''')
+    """)
 
-    query_members = text('''
-        SELECT * FROM "Members" WHERE "user" = :uid ORDER BY id
-    ''')
+    query_members = text("""
+        SELECT *
+        FROM "Members"
+        WHERE "user" = :uid
+        ORDER BY id
+    """)
 
     with engine.connect() as connection:
-        res_g = connection.execute(query_groups, {'uid': user_id})
-        groups = res_g.mappings().all()
+        groups = connection.execute(
+            query_groups,
+            {"uid": user_id},
+        ).mappings().all()
 
-        res_m = connection.execute(query_members, {'uid': user_id})
-        members = res_m.mappings().all()
+        members = connection.execute(
+            query_members,
+            {"uid": user_id},
+        ).mappings().all()
 
-    logger.info(f'[my_groups] found groups_count={len(groups)} members_count={len(members)}')
+    logger.info(
+        f"[my_groups] found groups_count={len(groups)} "
+        f"members_count={len(members)}"
+    )
 
-    return {'groups': groups, 'members': members}
-
+    return {
+        "groups": [dict(group) for group in groups],
+        "members": [dict(member) for member in members],
+    }
 
 @app.get("/groups")
 def get_groups():
 
     return get_all_from_table("Groups")
 
+# @app.get("/groups")
+# def get_groups(
+#     user_id: int = Depends(_get_user_id_from_token),
+# ):
+#     query = text("""
+#         SELECT
+#             g.*,
+#             membership.request_status AS membership_status,
+#             COALESCE(
+#                 membership.request_status = 'accepted',
+#                 FALSE
+#             ) AS is_member
+#         FROM "Groups" g
+#         LEFT JOIN LATERAL (
+#             SELECT m.request_status
+#             FROM "Members" m
+#             WHERE m."group" = g.id
+#               AND m."user" = :user_id
+#             ORDER BY m.created_at DESC, m.id DESC
+#             LIMIT 1
+#         ) membership ON TRUE
+#         ORDER BY g.id
+#     """)
+
+#     with engine.connect() as connection:
+#         groups = connection.execute(
+#             query,
+#             {"user_id": user_id},
+#         ).mappings().all()
+
+#     return [dict(group) for group in groups]
+
 
 @app.get("/members")
 def get_members():
 
     return get_all_from_table("Members")
+
+
+@app.post("/groups/{group_id}/join-requests", status_code=201)
+def request_to_join_group(
+    group_id: int,
+    user_id: int = Depends(_get_user_id_from_token),
+):
+    """
+    Crée ou renouvelle une demande pour rejoindre un groupe.
+
+    - pending : erreur 409
+    - accepted : erreur 409
+    - rejected : réutilise la ligne existante
+    - aucune demande existante : insère une nouvelle ligne
+    """
+
+    try:
+        with engine.begin() as conn:
+
+            # 1. Vérifier que le groupe existe
+            group_exists = conn.execute(
+                text("""
+                    SELECT id
+                    FROM "Groups"
+                    WHERE id = :group_id
+                """),
+                {"group_id": group_id},
+            ).scalar_one_or_none()
+
+            if group_exists is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Ce groupe n'existe pas.",
+                )
+
+            # 2. Récupérer les lignes existantes pour cet utilisateur
+            # et ce groupe, en verrouillant celles qui existent.
+            existing_rows = conn.execute(
+                text("""
+                    SELECT id, request_status, created_at
+                    FROM "Members"
+                    WHERE "user" = :user_id
+                      AND "group" = :group_id
+                    ORDER BY created_at DESC, id DESC
+                    FOR UPDATE
+                """),
+                {
+                    "user_id": user_id,
+                    "group_id": group_id,
+                },
+            ).mappings().all()
+
+            # 3. Refuser si une demande est déjà en attente.
+            if any(
+                row["request_status"] == "pending"
+                for row in existing_rows
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "Une demande pour rejoindre ce groupe "
+                        "est déjà en attente."
+                    ),
+                )
+
+            # 4. Refuser si l'utilisateur est déjà membre.
+            # On conserve la compatibilité avec les anciennes lignes
+            # dont active et request_status sont tous deux NULL.
+            already_member = any(
+                row["request_status"] == "accepted"
+                or row["active"] is True
+                or (
+                    row["active"] is None
+                    and row["request_status"] is None
+                )
+                for row in existing_rows
+            )
+
+            if already_member:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Vous êtes déjà membre de ce groupe.",
+                )
+
+            # 5. Chercher une demande précédemment rejetée.
+            rejected_row = next(
+                (
+                    row
+                    for row in existing_rows
+                    if row["request_status"] == "rejected"
+                ),
+                None,
+            )
+
+            if rejected_row is not None:
+                # 6a. Réutiliser la ligne rejetée :
+                # aucun nouvel INSERT.
+                result = conn.execute(
+                    text("""
+                        UPDATE "Members"
+                        SET request_status = 'pending',
+                            created_at = NOW()
+                        WHERE id = :member_id
+                        RETURNING id, created_at, request_status
+                    """),
+                    {"member_id": rejected_row["id"]},
+                ).mappings().one()
+
+                action = "updated"
+
+            else:
+                # 6b. Aucune demande rejetée à réutiliser :
+                # créer une nouvelle ligne.
+                result = conn.execute(
+                    text("""
+                        INSERT INTO "Members" (
+                            "user",
+                            "group",
+                            total_spent,
+                            request_status
+                        )
+                        VALUES (
+                            :user_id,
+                            :group_id,
+                            0,
+                            'pending'
+                        )
+                        RETURNING id, created_at, request_status
+                    """),
+                    {
+                        "user_id": user_id,
+                        "group_id": group_id,
+                    },
+                ).mappings().one()
+
+                action = "created"
+
+        logger.info(
+            "[request_to_join_group] "
+            "user_id=%s group_id=%s request_id=%s action=%s",
+            user_id,
+            group_id,
+            result["id"],
+            action,
+        )
+
+        return {
+            "success": True,
+            "message": (
+                "Votre demande pour rejoindre le groupe a été envoyée."
+            ),
+            "request": {
+                "id": result["id"],
+                "user_id": user_id,
+                "group_id": group_id,
+                "request_status": result["request_status"],
+                "created_at": result["created_at"],
+            },
+        }
+
+    except HTTPException:
+        raise
+
+    except Exception:
+        logger.exception(
+            "[request_to_join_group] Erreur pour user_id=%s, group_id=%s",
+            user_id,
+            group_id,
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Impossible d'envoyer la demande pour rejoindre le groupe."
+            ),
+        )
+
+
+@app.delete("/groups/{group_id}/leave")
+def leave_group(
+    group_id: int,
+    user_id: int = Depends(_get_user_id_from_token),
+):
+    """
+    Permet à l'utilisateur authentifié de quitter un groupe.
+
+    Seule son appartenance dans la table Members est supprimée.
+    Le groupe et ses grilles sont conservés.
+    """
+
+    delete_query = text("""
+        DELETE FROM "Members"
+        WHERE "group" = :group_id
+          AND "user" = :user_id
+        RETURNING id
+    """)
+
+    try:
+        with engine.begin() as conn:
+            membership_id = conn.execute(
+                delete_query,
+                {
+                    "group_id": group_id,
+                    "user_id": user_id,
+                },
+            ).scalar_one_or_none()
+
+            if membership_id is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Vous n'êtes pas membre de ce groupe.",
+                )
+
+        logger.info(
+            "[leave_group] user_id=%s left group_id=%s",
+            user_id,
+            group_id,
+        )
+
+        return {
+            "success": True,
+            "message": "Vous avez quitté le groupe.",
+            "group_id": group_id,
+        }
+
+    except HTTPException:
+        raise
+
+    except Exception:
+        logger.exception(
+            "[leave_group] Erreur pour user_id=%s, group_id=%s",
+            user_id,
+            group_id,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail="Impossible de quitter le groupe.",
+        )
+
 
 
 @app.get("/groups/{group_id}/members")
