@@ -7,6 +7,7 @@ import jwt
 from fastapi import FastAPI, Depends, Header, HTTPException
 from database import engine
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 
 from jwt import InvalidTokenError
 import asyncio
@@ -195,7 +196,7 @@ def me(user_id: int = Depends(_get_user_id_from_token)):
     #     WHERE id = :id
     # """)
     query = text("""
-        SELECT id, pseudo, credits
+        SELECT id, pseudo, credits, "isSuperAdmin"
         FROM "Users"
         WHERE id = :id
     """)
@@ -756,6 +757,68 @@ def get_euromillions_draws():
             for number, last_seen_date in overdue
         ],
     }
+
+
+@app.delete("/euromillions/draws/{draw_id}")
+def delete_euromillions_draw(
+    draw_id: int,
+    user_id: int = Depends(_get_user_id_from_token),
+):
+    try:
+        with engine.begin() as conn:
+            # Vérification des droits côté serveur.
+            # Ne jamais faire confiance au statut envoyé par Flutter.
+            admin_query = text("""
+                SELECT "isSuperAdmin"
+                FROM "Users"
+                WHERE id = :user_id
+            """)
+
+            is_super_admin = conn.execute(
+                admin_query,
+                {"user_id": user_id},
+            ).scalar_one_or_none()
+
+            if is_super_admin is not True:
+                raise HTTPException(
+                    status_code=403,
+                    detail="Accès réservé aux super-administrateurs",
+                )
+
+            # Suppression uniquement si le tirage existe.
+            delete_query = text("""
+                DELETE FROM "Draws"
+                WHERE id = :draw_id
+                RETURNING id
+            """)
+
+            deleted_id = conn.execute(
+                delete_query,
+                {"draw_id": draw_id},
+            ).scalar_one_or_none()
+
+            if deleted_id is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Tirage introuvable",
+                )
+
+        return {
+            "success": True,
+            "message": "Tirage supprimé",
+            "id": deleted_id,
+        }
+
+    except IntegrityError as exc:
+        # Une table liée référence peut-être encore ce tirage.
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Impossible de supprimer ce tirage : "
+                "des données liées le référencent encore."
+            ),
+        ) from exc
+
 
 
 @app.get("/euromillions/stats/current")
@@ -1337,7 +1400,6 @@ async def collect_euromillions():
 
     return {"message": message}
 
-from sqlalchemy.exc import IntegrityError
 
 @app.post("/collect/euromillions/latest")
 def collect_latest_euromillions():
