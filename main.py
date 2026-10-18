@@ -645,6 +645,161 @@ def get_group_members(
         "members": [dict(member) for member in members],
     }
 
+def _update_join_request_status(
+    member_id: int,
+    user_id: int,
+    new_status: str,
+):
+    if new_status not in ("accepted", "rejected"):
+        raise HTTPException(
+            status_code=400,
+            detail="Statut de demande invalide.",
+        )
+
+    try:
+        with engine.begin() as conn:
+            # 1. Récupérer et verrouiller la demande.
+            request_row = conn.execute(
+                text("""
+                    SELECT
+                        m.id AS member_id,
+                        m."user" AS user_id,
+                        m."group" AS group_id,
+                        m.request_status,
+                        u.pseudo
+                    FROM "Members" m
+                    JOIN "Users" u ON u.id = m."user"
+                    WHERE m.id = :member_id
+                    FOR UPDATE OF m
+                """),
+                {"member_id": member_id},
+            ).mappings().first()
+
+            if request_row is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Demande d'adhésion introuvable.",
+                )
+
+            group_id = request_row["group_id"]
+            requested_user_id = request_row["user_id"]
+
+            # 2. Vérifier que la demande est toujours en attente.
+            if request_row["request_status"] != "pending":
+                raise HTTPException(
+                    status_code=409,
+                    detail="Cette demande n'est plus en attente.",
+                )
+
+            # 3. Empêcher l'utilisateur de traiter sa propre demande.
+            if requested_user_id == user_id:
+                raise HTTPException(
+                    status_code=403,
+                    detail="Vous ne pouvez pas traiter votre propre demande.",
+                )
+
+            # 4. Vérifier que l'utilisateur connecté est membre accepté
+            # du groupe auquel appartient la demande.
+            is_accepted_member = conn.execute(
+                text("""
+                    SELECT 1
+                    FROM "Members"
+                    WHERE "group" = :group_id
+                      AND "user" = :user_id
+                      AND request_status = 'accepted'
+                    LIMIT 1
+                """),
+                {
+                    "group_id": group_id,
+                    "user_id": user_id,
+                },
+            ).scalar_one_or_none()
+
+            if is_accepted_member is None:
+                raise HTTPException(
+                    status_code=403,
+                    detail=(
+                        "Seuls les membres acceptés de ce groupe "
+                        "peuvent gérer les demandes."
+                    ),
+                )
+
+            # 5. Mettre à jour le statut de la demande.
+            updated = conn.execute(
+                text("""
+                    UPDATE "Members"
+                    SET request_status = :new_status
+                    WHERE id = :member_id
+                      AND request_status = 'pending'
+                    RETURNING
+                        id AS member_id,
+                        "user" AS user_id,
+                        "group" AS group_id,
+                        request_status
+                """),
+                {
+                    "new_status": new_status,
+                    "member_id": member_id,
+                },
+            ).mappings().first()
+
+            if updated is None:
+                raise HTTPException(
+                    status_code=409,
+                    detail="La demande a déjà été traitée.",
+                )
+
+        return {
+            "success": True,
+            "message": (
+                "Demande acceptée."
+                if new_status == "accepted"
+                else "Demande refusée."
+            ),
+            "request": {
+                **dict(updated),
+                "pseudo": request_row["pseudo"],
+            },
+        }
+
+    except HTTPException:
+        raise
+
+    except Exception:
+        logger.exception(
+            "[update_join_request] member_id=%s status=%s",
+            member_id,
+            new_status,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail="Impossible de traiter la demande d'adhésion.",
+        )
+
+
+@app.post("/join-requests/{member_id}/accept")
+def accept_join_request(
+    member_id: int,
+    user_id: int = Depends(_get_user_id_from_token),
+):
+    return _update_join_request_status(
+        member_id=member_id,
+        user_id=user_id,
+        new_status="accepted",
+    )
+
+
+@app.post("/join-requests/{member_id}/reject")
+def reject_join_request(
+    member_id: int,
+    user_id: int = Depends(_get_user_id_from_token),
+):
+    return _update_join_request_status(
+        member_id=member_id,
+        user_id=user_id,
+        new_status="rejected",
+    )
+
 
 @app.post("/groups/{group_id}/grids")
 def create_group_grid(
