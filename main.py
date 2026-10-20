@@ -419,14 +419,8 @@ def request_to_join_group(
 
             # 4. Refuser si l'utilisateur est déjà membre.
             # On conserve la compatibilité avec les anciennes lignes
-            # dont active et request_status sont tous deux NULL.
             already_member = any(
                 row["request_status"] == "accepted"
-                or row["active"] is True
-                or (
-                    row["active"] is None
-                    and row["request_status"] is None
-                )
                 for row in existing_rows
             )
 
