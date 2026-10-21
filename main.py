@@ -241,7 +241,9 @@ def my_groups(
     )
 
     query_groups = text("""
-        SELECT g.*
+        SELECT
+            g.*,
+            m."isGroupAdmin" AS "isGroupAdmin"
         FROM "Groups" g
         JOIN "Members" m
           ON g.id = m."group"
@@ -278,6 +280,7 @@ def my_groups(
         "members": [dict(member) for member in members],
     }
 
+
 @app.get("/groups")
 def get_groups():
 
@@ -286,8 +289,21 @@ def get_groups():
 
 @app.get("/members")
 def get_members():
+    query = text("""
+        SELECT
+            m.*,
+            u.pseudo AS pseudo
+        FROM "Members" m
+        LEFT JOIN "Users" u
+            ON u.id = m."user"
+        ORDER BY m.id
+    """)
 
-    return get_all_from_table("Members")
+    with engine.connect() as connection:
+        members = connection.execute(query).mappings().all()
+
+    return [dict(member) for member in members]
+
 
 
 @app.post("/groups/{group_id}/join-requests", status_code=201)
@@ -580,6 +596,7 @@ def get_group_members(
             m."user" AS user_id,
             m.total_spent AS total_spent,
             m.request_status AS request_status,
+            m."isGroupAdmin" AS "isGroupAdmin",
             u.pseudo
         FROM "Members" m
         JOIN "Users" u
@@ -613,6 +630,8 @@ def get_group_members(
         "group_id": group_id,
         "members": [dict(member) for member in members],
     }
+
+
 
 def _update_join_request_status(
     member_id: int,
