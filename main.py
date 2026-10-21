@@ -190,11 +190,6 @@ def _get_user_id_from_token(
 
 @app.get("/me")
 def me(user_id: int = Depends(_get_user_id_from_token)):
-    # query = text("""
-    #     SELECT id, pseudo
-    #     FROM "Users"
-    #     WHERE id = :id
-    # """)
     query = text("""
         SELECT id, pseudo, credits, "isSuperAdmin"
         FROM "Users"
@@ -236,33 +231,6 @@ def login(body: dict):
 
     return {'token': token, 'pseudo': result.get('pseudo'), 'id': result.get('id')}
 
-
-# @app.get('/my_groups')
-# def my_groups(user_id: int = Depends(_get_user_id_from_token)):
-#     logger.info(f'[my_groups] requested for user_id={user_id}')
-
-#     query_groups = text('''
-#         SELECT g.*
-#         FROM "Groups" g
-#         JOIN "Members" m ON g.id = m."group"
-#         WHERE m."user" = :uid
-#         ORDER BY g.id
-#     ''')
-
-#     query_members = text('''
-#         SELECT * FROM "Members" WHERE "user" = :uid ORDER BY id
-#     ''')
-
-#     with engine.connect() as connection:
-#         res_g = connection.execute(query_groups, {'uid': user_id})
-#         groups = res_g.mappings().all()
-
-#         res_m = connection.execute(query_members, {'uid': user_id})
-#         members = res_m.mappings().all()
-
-#     logger.info(f'[my_groups] found groups_count={len(groups)} members_count={len(members)}')
-
-#     return {'groups': groups, 'members': members}
 
 @app.get("/my_groups")
 def my_groups(
@@ -315,38 +283,6 @@ def get_groups():
 
     return get_all_from_table("Groups")
 
-# @app.get("/groups")
-# def get_groups(
-#     user_id: int = Depends(_get_user_id_from_token),
-# ):
-#     query = text("""
-#         SELECT
-#             g.*,
-#             membership.request_status AS membership_status,
-#             COALESCE(
-#                 membership.request_status = 'accepted',
-#                 FALSE
-#             ) AS is_member
-#         FROM "Groups" g
-#         LEFT JOIN LATERAL (
-#             SELECT m.request_status
-#             FROM "Members" m
-#             WHERE m."group" = g.id
-#               AND m."user" = :user_id
-#             ORDER BY m.created_at DESC, m.id DESC
-#             LIMIT 1
-#         ) membership ON TRUE
-#         ORDER BY g.id
-#     """)
-
-#     with engine.connect() as connection:
-#         groups = connection.execute(
-#             query,
-#             {"user_id": user_id},
-#         ).mappings().all()
-
-#     return [dict(group) for group in groups]
-
 
 @app.get("/members")
 def get_members():
@@ -387,22 +323,6 @@ def request_to_join_group(
                     detail="Ce groupe n'existe pas.",
                 )
 
-            # 2. Récupérer les lignes existantes pour cet utilisateur
-            # et ce groupe, en verrouillant celles qui existent.
-            # existing_rows = conn.execute(
-            #     text("""
-            #         SELECT id, request_status, created_at
-            #         FROM "Members"
-            #         WHERE "user" = :user_id
-            #           AND "group" = :group_id
-            #         ORDER BY created_at DESC, id DESC
-            #         FOR UPDATE
-            #     """),
-            #     {
-            #         "user_id": user_id,
-            #         "group_id": group_id,
-            #     },
-            # ).mappings().all()
             existing_rows = conn.execute(
                 text("""
                     SELECT
@@ -472,22 +392,6 @@ def request_to_join_group(
                 ),
                 None,
             )
-
-            # if rejected_row is not None:
-            #     # 6a. Réutiliser la ligne rejetée :
-            #     # aucun nouvel INSERT.
-            #     result = conn.execute(
-            #         text("""
-            #             UPDATE "Members"
-            #             SET request_status = 'pending',
-            #                 created_at = NOW()
-            #             WHERE id = :member_id
-            #             RETURNING id, created_at, request_status
-            #         """),
-            #         {"member_id": rejected_row["id"]},
-            #     ).mappings().one()
-
-            #     action = "updated"
             if rejected_row is not None:
                 remaining_seconds = int(
                     rejected_row["remaining_seconds"] or 0
@@ -794,7 +698,6 @@ def _update_join_request_status(
                 text("""
                     UPDATE "Members"
                     SET request_status = :new_status,
-                    # updated_at = NOW()
                     updated_at = CASE
                         WHEN :new_status = 'rejected' THEN NOW()
                         ELSE updated_at
