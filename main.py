@@ -243,7 +243,7 @@ def my_groups(
     query_groups = text("""
         SELECT
             g.*,
-            m."isGroupAdmin" AS "isGroupAdmin"
+            m."adminStatus" AS "adminStatus"
         FROM "Groups" g
         JOIN "Members" m
           ON g.id = m."group"
@@ -451,21 +451,42 @@ def request_to_join_group(
                 # 6b. Aucune demande rejetée à réutiliser :
                 # créer une nouvelle ligne.
                 result = conn.execute(
+                    # text("""
+                    #     INSERT INTO "Members" (
+                    #         "user",
+                    #         "group",
+                    #         total_spent,
+                    #         request_status
+                    #     )
+                    #     VALUES (
+                    #         :user_id,
+                    #         :group_id,
+                    #         0,
+                    #         'pending'
+                    #     )
+                    #     RETURNING id, created_at, request_status
+                    # """),
                     text("""
-                        INSERT INTO "Members" (
-                            "user",
-                            "group",
-                            total_spent,
-                            request_status
-                        )
-                        VALUES (
-                            :user_id,
-                            :group_id,
-                            0,
-                            'pending'
-                        )
-                        RETURNING id, created_at, request_status
-                    """),
+                    INSERT INTO "Members" (
+                        "user",
+                        "group",
+                        total_spent,
+                        request_status,
+                        "adminStatus"
+                    )
+                    VALUES (
+                        :user_id,
+                        :group_id,
+                        0,
+                        'pending',
+                        NULL
+                    )
+                    RETURNING
+                        id,
+                        created_at,
+                        request_status,
+                        "adminStatus"
+                        """),
                     {
                         "user_id": user_id,
                         "group_id": group_id,
@@ -596,7 +617,7 @@ def get_group_members(
             m."user" AS user_id,
             m.total_spent AS total_spent,
             m.request_status AS request_status,
-            m."isGroupAdmin" AS "isGroupAdmin",
+            m."adminStatus" AS "adminStatus",
             u.pseudo
         FROM "Members" m
         JOIN "Users" u
@@ -630,6 +651,392 @@ def get_group_members(
         "group_id": group_id,
         "members": [dict(member) for member in members],
     }
+
+
+
+def _get_group_admin_permissions(conn, group_id: int, user_id: int):
+    """
+    Retourne les droits de l'utilisateur connecté dans le groupe.
+    Un superadmin est autorisé même s'il n'est pas membre du groupe.
+    """
+    result = conn.execute(
+        text("""
+            SELECT
+                u."isSuperAdmin" AS is_super_admin,
+                m."adminStatus" AS admin_status
+            FROM "Users" u
+            LEFT JOIN "Members" m
+                ON m."user" = u.id
+               AND m."group" = :group_id
+               AND m.request_status = 'accepted'
+            WHERE u.id = :user_id
+        """),
+        {
+            "group_id": group_id,
+            "user_id": user_id,
+        },
+    ).mappings().first()
+
+    if result is None:
+        raise HTTPException(
+            status_code=401,
+            detail="Utilisateur introuvable.",
+        )
+
+    return {
+        "is_super_admin": result["is_super_admin"] is True,
+        "is_group_admin": result["admin_status"] == "accepted",
+    }
+
+
+def _require_group_admin(conn, group_id: int, user_id: int):
+    permissions = _get_group_admin_permissions(
+        conn,
+        group_id,
+        user_id,
+    )
+
+    if not (
+        permissions["is_super_admin"]
+        or permissions["is_group_admin"]
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Action réservée aux administrateurs du groupe "
+                "et aux superadministrateurs."
+            ),
+        )
+
+
+@app.post("/groups/{group_id}/admin-requests")
+def request_group_admin(
+    group_id: int,
+    user_id: int = Depends(_get_user_id_from_token),
+):
+    """
+    Si aucun admin n'existe, le membre devient admin directement.
+    Sinon, sa demande passe à pending.
+    adminStatus=NULL signifie qu'aucune demande n'a été faite.
+    """
+    try:
+        with engine.begin() as conn:
+            membership = conn.execute(
+                text("""
+                    SELECT id, "adminStatus"
+                    FROM "Members"
+                    WHERE "group" = :group_id
+                      AND "user" = :user_id
+                      AND request_status = 'accepted'
+                    FOR UPDATE
+                """),
+                {
+                    "group_id": group_id,
+                    "user_id": user_id,
+                },
+            ).mappings().first()
+
+            if membership is None:
+                raise HTTPException(
+                    status_code=403,
+                    detail=(
+                        "Vous devez être membre accepté "
+                        "du groupe pour demander à devenir admin."
+                    ),
+                )
+
+            current_status = membership["adminStatus"]
+
+            if current_status == "accepted":
+                raise HTTPException(
+                    status_code=409,
+                    detail="Vous êtes déjà administrateur de ce groupe.",
+                )
+
+            if current_status == "pending":
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "Votre demande d'administration "
+                        "est déjà en attente."
+                    ),
+                )
+
+            # Vérifier si un administrateur existe déjà.
+            admin_exists = conn.execute(
+                text("""
+                    SELECT 1
+                    FROM "Members"
+                    WHERE "group" = :group_id
+                      AND request_status = 'accepted'
+                      AND "adminStatus" = 'accepted'
+                    LIMIT 1
+                """),
+                {"group_id": group_id},
+            ).scalar_one_or_none() is not None
+
+            new_status = "pending" if admin_exists else "accepted"
+
+            conn.execute(
+                text("""
+                    UPDATE "Members"
+                    SET "adminStatus" = :new_status,
+                        updated_at = NOW()
+                    WHERE id = :member_id
+                """),
+                {
+                    "new_status": new_status,
+                    "member_id": membership["id"],
+                },
+            )
+
+        if new_status == "accepted":
+            message = (
+                "Vous êtes maintenant administrateur du groupe."
+            )
+        else:
+            message = (
+                "Votre demande pour devenir administrateur "
+                "a été envoyée."
+            )
+
+        return {
+            "success": True,
+            "message": message,
+            "adminStatus": new_status,
+        }
+
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception(
+            "[request_group_admin] group_id=%s user_id=%s",
+            group_id,
+            user_id,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail="Impossible d'envoyer la demande d'administration.",
+        )
+
+
+def _update_admin_request(
+    member_id: int,
+    user_id: int,
+    new_status: str,
+):
+    if new_status not in ("accepted", "rejected"):
+        raise HTTPException(
+            status_code=400,
+            detail="Statut d'administration invalide.",
+        )
+
+    try:
+        with engine.begin() as conn:
+            target = conn.execute(
+                text("""
+                    SELECT
+                        id,
+                        "group" AS group_id,
+                        "user" AS target_user_id,
+                        request_status,
+                        "adminStatus" AS admin_status
+                    FROM "Members"
+                    WHERE id = :member_id
+                    FOR UPDATE
+                """),
+                {"member_id": member_id},
+            ).mappings().first()
+
+            if target is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Membre introuvable.",
+                )
+
+            group_id = target["group_id"]
+
+            _require_group_admin(
+                conn,
+                group_id,
+                user_id,
+            )
+
+            if target["target_user_id"] == user_id:
+                raise HTTPException(
+                    status_code=403,
+                    detail=(
+                        "Vous ne pouvez pas traiter "
+                        "votre propre demande d'administration."
+                    ),
+                )
+
+            if target["request_status"] != "accepted":
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "Seul un membre accepté peut "
+                        "devenir administrateur."
+                    ),
+                )
+
+            if target["admin_status"] != "pending":
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "Cette demande d'administration "
+                        "n'est plus en attente."
+                    ),
+                )
+
+            conn.execute(
+                text("""
+                    UPDATE "Members"
+                    SET "adminStatus" = :new_status,
+                        updated_at = NOW()
+                    WHERE id = :member_id
+                """),
+                {
+                    "new_status": new_status,
+                    "member_id": member_id,
+                },
+            )
+
+        return {
+            "success": True,
+            "message": (
+                "Demande d'administration acceptée."
+                if new_status == "accepted"
+                else "Demande d'administration refusée."
+            ),
+            "member_id": member_id,
+            "group_id": group_id,
+            "adminStatus": new_status,
+        }
+
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception(
+            "[update_admin_request] member_id=%s status=%s",
+            member_id,
+            new_status,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Impossible de traiter la demande d'administration."
+            ),
+        )
+
+
+@app.post("/admin-requests/{member_id}/accept")
+def accept_admin_request(
+    member_id: int,
+    user_id: int = Depends(_get_user_id_from_token),
+):
+    return _update_admin_request(
+        member_id=member_id,
+        user_id=user_id,
+        new_status="accepted",
+    )
+
+
+@app.post("/admin-requests/{member_id}/reject")
+def reject_admin_request(
+    member_id: int,
+    user_id: int = Depends(_get_user_id_from_token),
+):
+    return _update_admin_request(
+        member_id=member_id,
+        user_id=user_id,
+        new_status="rejected",
+    )
+
+
+@app.post("/groups/{group_id}/members/{member_id}/promote-admin")
+def promote_group_member(
+    group_id: int,
+    member_id: int,
+    user_id: int = Depends(_get_user_id_from_token),
+):
+    """
+    Promeut un membre accepté au rang d'administrateur.
+    Action réservée aux admins du groupe et aux superadmins.
+    """
+    try:
+        with engine.begin() as conn:
+            _require_group_admin(
+                conn,
+                group_id,
+                user_id,
+            )
+
+            target = conn.execute(
+                text("""
+                    SELECT id, request_status, "adminStatus"
+                    FROM "Members"
+                    WHERE id = :member_id
+                      AND "group" = :group_id
+                    FOR UPDATE
+                """),
+                {
+                    "member_id": member_id,
+                    "group_id": group_id,
+                },
+            ).mappings().first()
+
+            if target is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Membre introuvable dans ce groupe.",
+                )
+
+            if target["request_status"] != "accepted":
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "Seul un membre accepté peut être promu."
+                    ),
+                )
+
+            if target["adminStatus"] == "accepted":
+                raise HTTPException(
+                    status_code=409,
+                    detail="Ce membre est déjà administrateur.",
+                )
+
+            conn.execute(
+                text("""
+                    UPDATE "Members"
+                    SET "adminStatus" = 'accepted',
+                        updated_at = NOW()
+                    WHERE id = :member_id
+                """),
+                {"member_id": member_id},
+            )
+
+        return {
+            "success": True,
+            "message": "Le membre est maintenant administrateur.",
+            "member_id": member_id,
+            "group_id": group_id,
+            "adminStatus": "accepted",
+        }
+
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception(
+            "[promote_group_member] group_id=%s member_id=%s",
+            group_id,
+            member_id,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail="Impossible de promouvoir ce membre.",
+        )
+
 
 
 
@@ -686,29 +1093,72 @@ def _update_join_request_status(
                     detail="Vous ne pouvez pas traiter votre propre demande.",
                 )
 
-            # 4. Vérifier que l'utilisateur connecté est membre accepté
-            # du groupe auquel appartient la demande.
-            is_accepted_member = conn.execute(
+            # # 4. Vérifier que l'utilisateur connecté est membre accepté
+            # # du groupe auquel appartient la demande.
+            # is_accepted_member = conn.execute(
+            #     text("""
+            #         SELECT 1
+            #         FROM "Members"
+            #         WHERE "group" = :group_id
+            #           AND "user" = :user_id
+            #           AND request_status = 'accepted'
+            #         LIMIT 1
+            #     """),
+            #     {
+            #         "group_id": group_id,
+            #         "user_id": user_id,
+            #     },
+            # ).scalar_one_or_none()
+
+            # if is_accepted_member is None:
+            #     raise HTTPException(
+            #         status_code=403,
+            #         detail=(
+            #             "Seuls les membres acceptés de ce groupe "
+            #             "peuvent gérer les demandes."
+            #         ),
+            #     )
+
+            # 4. Vérifier que l'utilisateur est admin du groupe
+            # ou superadmin de l'application.
+            permissions = conn.execute(
                 text("""
-                    SELECT 1
-                    FROM "Members"
-                    WHERE "group" = :group_id
-                      AND "user" = :user_id
-                      AND request_status = 'accepted'
-                    LIMIT 1
+                    SELECT
+                        u."isSuperAdmin" AS is_super_admin,
+                        m."adminStatus" AS admin_status
+                    FROM "Users" u
+                    LEFT JOIN "Members" m
+                        ON m."user" = u.id
+                       AND m."group" = :group_id
+                       AND m.request_status = 'accepted'
+                    WHERE u.id = :user_id
                 """),
                 {
                     "group_id": group_id,
                     "user_id": user_id,
                 },
-            ).scalar_one_or_none()
+            ).mappings().first()
 
-            if is_accepted_member is None:
+            if permissions is None:
+                raise HTTPException(
+                    status_code=403,
+                    detail="Accès refusé.",
+                )
+
+            is_super_admin = (
+                permissions["is_super_admin"] is True
+            )
+            is_group_admin = (
+                permissions["admin_status"] == "accepted"
+            )
+
+            if not is_super_admin and not is_group_admin:
                 raise HTTPException(
                     status_code=403,
                     detail=(
-                        "Seuls les membres acceptés de ce groupe "
-                        "peuvent gérer les demandes."
+                        "Seuls les administrateurs du groupe "
+                        "et les superadministrateurs peuvent "
+                        "gérer les demandes d'adhésion."
                     ),
                 )
 
