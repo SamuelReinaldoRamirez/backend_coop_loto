@@ -389,12 +389,45 @@ def request_to_join_group(
 
             # 2. Récupérer les lignes existantes pour cet utilisateur
             # et ce groupe, en verrouillant celles qui existent.
+            # existing_rows = conn.execute(
+            #     text("""
+            #         SELECT id, request_status, created_at
+            #         FROM "Members"
+            #         WHERE "user" = :user_id
+            #           AND "group" = :group_id
+            #         ORDER BY created_at DESC, id DESC
+            #         FOR UPDATE
+            #     """),
+            #     {
+            #         "user_id": user_id,
+            #         "group_id": group_id,
+            #     },
+            # ).mappings().all()
             existing_rows = conn.execute(
                 text("""
-                    SELECT id, request_status, created_at
+                    SELECT
+                        id,
+                        request_status,
+                        created_at,
+                        updated_at,
+                        CASE
+                            WHEN updated_at IS NULL THEN 0
+                            ELSE GREATEST(
+                                0,
+                                CEIL(
+                                    EXTRACT(
+                                        EPOCH FROM (
+                                            updated_at
+                                            + INTERVAL '3 minutes'
+                                            - NOW()
+                                        )
+                                    )
+                                )::int
+                            )
+                        END AS remaining_seconds
                     FROM "Members"
                     WHERE "user" = :user_id
-                      AND "group" = :group_id
+                    AND "group" = :group_id
                     ORDER BY created_at DESC, id DESC
                     FOR UPDATE
                 """),
@@ -440,16 +473,54 @@ def request_to_join_group(
                 None,
             )
 
+            # if rejected_row is not None:
+            #     # 6a. Réutiliser la ligne rejetée :
+            #     # aucun nouvel INSERT.
+            #     result = conn.execute(
+            #         text("""
+            #             UPDATE "Members"
+            #             SET request_status = 'pending',
+            #                 created_at = NOW()
+            #             WHERE id = :member_id
+            #             RETURNING id, created_at, request_status
+            #         """),
+            #         {"member_id": rejected_row["id"]},
+            #     ).mappings().one()
+
+            #     action = "updated"
             if rejected_row is not None:
-                # 6a. Réutiliser la ligne rejetée :
-                # aucun nouvel INSERT.
+                remaining_seconds = int(
+                    rejected_row["remaining_seconds"] or 0
+                )
+
+                if remaining_seconds > 0:
+                    minutes = remaining_seconds // 60
+                    seconds = remaining_seconds % 60
+
+                    raise HTTPException(
+                        status_code=409,
+                        detail={
+                            "message": (
+                                "Vous devez attendre avant de pouvoir "
+                                "renvoyer une demande."
+                            ),
+                            "remaining_seconds": remaining_seconds,
+                            "remaining_minutes": minutes,
+                            "remaining_seconds_part": seconds,
+                        },
+                    )
+
                 result = conn.execute(
                     text("""
                         UPDATE "Members"
                         SET request_status = 'pending',
                             created_at = NOW()
                         WHERE id = :member_id
-                        RETURNING id, created_at, request_status
+                        RETURNING
+                            id,
+                            created_at,
+                            updated_at,
+                            request_status
                     """),
                     {"member_id": rejected_row["id"]},
                 ).mappings().one()
@@ -722,7 +793,12 @@ def _update_join_request_status(
             updated = conn.execute(
                 text("""
                     UPDATE "Members"
-                    SET request_status = :new_status
+                    SET request_status = :new_status,
+                    # updated_at = NOW()
+                    updated_at = CASE
+                        WHEN :new_status = 'rejected' THEN NOW()
+                        ELSE updated_at
+                    END
                     WHERE id = :member_id
                       AND request_status = 'pending'
                     RETURNING
